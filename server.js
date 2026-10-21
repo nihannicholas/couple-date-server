@@ -2,19 +2,19 @@
 // - Pairs two people in a room and passes messages between them.
 // - Audio / video never pass through here: they go phone-to-phone (or via the TURN relay).
 // - NOTHING is saved. Rooms live in memory only, and disappear when people leave
-//   (or about 2 minutes after a phone loses connection and does not come back).
+//   (or about 10 minutes after a phone loses connection and does not come back).
 // - GET /ice gives the app the relay (TURN) settings, read from environment variables.
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8080;
-const GRACE_MS = Number(process.env.GRACE_MS || 120000); // how long a dropped phone can come back
+const GRACE_MS = Number(process.env.GRACE_MS || 600000); // how long a dropped phone (for example a locked one) can come back: 10 minutes
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 
 // Message types that are passed straight to the other person.
 const RELAY = new Set([
-  'chat', 'profile', 'react', 'miss', 'cam-state',
+  'chat', 'ack', 'read', 'profile', 'react', 'miss', 'cam-state',
   'call-request', 'call-accept', 'call-decline', 'call-end',
   'offer', 'answer', 'ice',
   'screen-offer', 'screen-answer', 'screen-ice', 'screen-stop', 'screen-busy',
