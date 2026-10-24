@@ -2,14 +2,17 @@
 // - Pairs two people in a room and passes messages between them.
 // - Audio / video never pass through here: they go phone-to-phone (or via the TURN relay).
 // - NOTHING is saved. Rooms live in memory only, and disappear when people leave
-//   (or about 10 minutes after a phone loses connection and does not come back).
+//   (or about an hour after a phone loses connection and does not come back).
+// - Push notifications (message / call knock): the app sends {type:'push', token, kind}
+//   and the server only passes a tiny generic notification to Google (Firebase).
+//   Tokens are NOT stored: each phone keeps its partner's token itself.
 // - GET /ice gives the app the relay (TURN) settings, read from environment variables.
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8080;
-const GRACE_MS = Number(process.env.GRACE_MS || 600000); // how long a dropped phone (for example a locked one) can come back: 10 minutes
+const GRACE_MS = Number(process.env.GRACE_MS || 3600000); // how long a dropped phone (for example a locked one) can come back: 1 hour
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 
 // Message types that are passed straight to the other person.
@@ -88,6 +91,61 @@ async function buildIceServers() {
   return servers;
 }
 
+// ---------- push notifications (Firebase) ----------
+// Needs one setting on Render: FIREBASE_SERVICE_ACCOUNT (the whole private key file text).
+const PUSH_TEXT = {
+  chat: ['Couple Date', 'sent you a message', 'messages', '86400s'],
+  call: ['Couple Date', 'is calling you', 'calls', '30s'],
+  love: ['Couple Date', 'is loving you \u2665', 'messages', '3600s'],
+  miss: ['Couple Date', 'is thinking of you \u2665', 'messages', '3600s'],
+};
+const fakePushes = []; // only used by the tests (PUSH_FAKE=1)
+let fbMessaging = null;
+let fbTried = false;
+
+function getMessaging() {
+  if (fbMessaging || fbTried) return fbMessaging;
+  fbTried = true;
+  try {
+    const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+    if (!raw) return null;
+    const admin = require('firebase-admin');
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(raw)) });
+    fbMessaging = admin.messaging();
+  } catch (e) {
+    console.log('Firebase setup failed:', e.message);
+  }
+  return fbMessaging;
+}
+
+async function sendPush(token, kind, from) {
+  const t = PUSH_TEXT[kind];
+  if (!t) return { ok: false, error: 'bad kind' };
+  const who = String(from || '').replace(/[^\p{L}\p{N} _.-]/gu, '').slice(0, 20).trim();
+  const body = who ? `${who} ${t[1]}` : `Your partner ${t[1]}`;
+  if (process.env.PUSH_FAKE) {
+    fakePushes.push({ token, kind, body });
+    return { ok: true };
+  }
+  const m = getMessaging();
+  if (!m) return { ok: false, error: 'push is not set up on the server' };
+  try {
+    await m.send({
+      token,
+      notification: { title: t[0], body },
+      data: { kind },
+      android: {
+        priority: 'high',
+        ttl: Number.parseInt(t[3], 10) * 1000,
+        notification: { channelId: t[2], tag: kind },
+      },
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.code) || (e && e.message) || e).slice(0, 80) };
+  }
+}
+
 // ---------- web page (health check + /ice) ----------
 const server = http.createServer(async (req, res) => {
   const path = (req.url || '/').split('?')[0];
@@ -95,6 +153,10 @@ const server = http.createServer(async (req, res) => {
     const iceServers = await buildIceServers();
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify({ iceServers }));
+  }
+  if (path === '/__pushes' && process.env.PUSH_FAKE) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(fakePushes));
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Couple Date server is running');
@@ -190,6 +252,45 @@ wss.on('connection', (ws) => {
       return send(ws, { type: 'created', code, role: 'host' });
     }
 
+    // ----- knock on the partner's phone through Google (works even if she is not in a room) -----
+    if (msg.type === 'push') {
+      const token = msg.token;
+      const kind = String(msg.kind || '');
+      if (typeof token !== 'string' || token.length < 50 || token.length > 4096 || !PUSH_TEXT[kind]) return;
+      const now = Date.now();
+      ws.pushLast = ws.pushLast || {};
+      ws.pushLog = (ws.pushLog || []).filter((x) => now - x < 3600000);
+      if (now - (ws.pushLast[kind] || 0) < 8000 || ws.pushLog.length >= 40) {
+        return send(ws, { type: 'push-result', ok: false, error: 'too fast', kind });
+      }
+      ws.pushLast[kind] = now;
+      ws.pushLog.push(now);
+      sendPush(token, kind, msg.from).then((r2) => send(ws, { type: 'push-result', kind, ...r2 }));
+      return;
+    }
+
+    // ----- the server forgot my room (it restarted): make it again with the same code -----
+    if (msg.type === 'recreate') {
+      if (ws.room) return;
+      if (!validDevice(msg.deviceId)) return send(ws, { type: 'error', message: 'Update the app.' });
+      const code = String(msg.code || '').toUpperCase().trim();
+      if (!/^[A-Z0-9]{6}$/.test(code)) return send(ws, { type: 'error', message: 'Bad room code.' });
+      let room = rooms.get(code);
+      if (!room) {
+        room = { code, pin: null, host: null, guest: null };
+        rooms.set(code, room);
+        attach(room, 'host', ws, msg.deviceId);
+        return send(ws, { type: 'created', code, role: 'host' });
+      }
+      if (room.host && room.host.id === msg.deviceId) {
+        attach(room, 'host', ws, msg.deviceId);
+        send(ws, { type: 'created', code, role: 'host' });
+        if (room.guest) send(room.guest.ws, { type: 'peer-back' });
+        return;
+      }
+      return send(ws, { type: 'error', message: 'Room code is taken.' });
+    }
+
     // ----- "Our room": your own fixed code + PIN, created the first time someone opens it -----
     if (msg.type === 'ourroom') {
       if (ws.room) return;
@@ -233,7 +334,7 @@ wss.on('connection', (ws) => {
       const code = String(msg.code || '').toUpperCase().trim();
       const room = rooms.get(code);
       if (!room) {
-        if (tooManyTries(ws)) return;
+        if (msg.retry !== true && tooManyTries(ws)) return; // retry = the app waiting for the host to rebuild
         return send(ws, { type: 'error', message: 'Room not found. Check the code.' });
       }
       if (room.pin) return send(ws, { type: 'error', message: 'This is a private room. Use the "Our room" button.' });
