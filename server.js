@@ -162,7 +162,8 @@ const server = http.createServer(async (req, res) => {
   res.end('Couple Date server is running');
 });
 
-const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 });
+// Up to 2 MB per message: a photo (about 300 KB) or a 5 minute voice message (about 1.2 MB). Nothing is saved.
+const wss = new WebSocketServer({ server, maxPayload: 2 * 1024 * 1024 });
 
 // ---------- helpers ----------
 function send(ws, obj) {
