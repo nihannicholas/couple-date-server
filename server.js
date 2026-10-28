@@ -18,7 +18,7 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 // Message types that are passed straight to the other person.
 const RELAY = new Set([
   'chat', 'ack', 'read', 'profile', 'react', 'miss', 'cam-state',
-  'typing', 'touch', 'mic-state',
+  'typing', 'touch', 'mic-state', 'key',
   'call-request', 'call-accept', 'call-decline', 'call-end',
   'offer', 'answer', 'ice',
   'screen-offer', 'screen-answer', 'screen-ice', 'screen-stop', 'screen-busy',
@@ -164,7 +164,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 // Up to 2 MB per message: a photo (about 300 KB) or a 5 minute voice message (about 1.2 MB). Nothing is saved.
-const wss = new WebSocketServer({ server, maxPayload: 2 * 1024 * 1024 });
+const wss = new WebSocketServer({ server, maxPayload: 4 * 1024 * 1024 });
 
 // ---------- helpers ----------
 function send(ws, obj) {
