@@ -18,7 +18,7 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 // Message types that are passed straight to the other person.
 const RELAY = new Set([
   'chat', 'ack', 'read', 'profile', 'react', 'miss', 'cam-state',
-  'typing', 'touch', 'mic-state', 'key',
+  'typing', 'touch', 'mic-state', 'key', 'ludo',
   'call-request', 'call-accept', 'call-decline', 'call-end',
   'offer', 'answer', 'ice',
   'screen-offer', 'screen-answer', 'screen-ice', 'screen-stop', 'screen-busy',
